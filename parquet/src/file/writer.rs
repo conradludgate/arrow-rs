@@ -23,7 +23,7 @@ use crate::format as parquet;
 use crate::format::{ColumnIndex, OffsetIndex, RowGroup};
 use crate::thrift::TSerializable;
 use std::fmt::Debug;
-use std::io::{BufWriter, IoSlice, Read};
+use std::io::{IoSlice, Read};
 use std::{io::Write, sync::Arc};
 use thrift::protocol::TCompactOutputProtocol;
 
@@ -42,16 +42,15 @@ use crate::schema::types::{self, ColumnDescPtr, SchemaDescPtr, SchemaDescriptor,
 /// of bytes that have been written. The given [`Write`] is wrapped
 /// with a [`BufWriter`] to optimize writing performance.
 pub struct TrackedWrite<W: Write> {
-    inner: BufWriter<W>,
+    inner: W,
     bytes_written: usize,
 }
 
 impl<W: Write> TrackedWrite<W> {
     /// Create a new [`TrackedWrite`] from a [`Write`]
     pub fn new(inner: W) -> Self {
-        let buf_write = BufWriter::new(inner);
         Self {
-            inner: buf_write,
+            inner,
             bytes_written: 0,
         }
     }
@@ -62,10 +61,8 @@ impl<W: Write> TrackedWrite<W> {
     }
 
     /// Returns the underlying writer.
-    pub fn into_inner(self) -> Result<W> {
-        self.inner.into_inner().map_err(|err| {
-            ParquetError::General(format!("fail to get inner writer: {:?}", err.to_string()))
-        })
+    pub fn into_inner(self) -> W {
+        self.inner
     }
 }
 
@@ -211,10 +208,8 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     }
 
     /// Closes and finalises file writer, returning the file metadata.
-    pub fn close(mut self) -> Result<parquet::FileMetaData> {
-        self.assert_previous_writer_closed()?;
-        let metadata = self.write_metadata()?;
-        Ok(metadata)
+    pub fn close(self) -> Result<parquet::FileMetaData> {
+        self.finish().map(|x| x.1)
     }
 
     /// Writes magic bytes at the beginning of the file.
@@ -388,11 +383,17 @@ impl<W: Write + Send> SerializedFileWriter<W> {
     }
 
     /// Writes the file footer and returns the underlying writer.
-    pub fn into_inner(mut self) -> Result<W> {
-        self.assert_previous_writer_closed()?;
-        let _ = self.write_metadata()?;
+    pub fn into_inner(self) -> Result<W> {
+        self.finish().map(|x| x.0)
+    }
 
-        self.buf.into_inner()
+    /// Writes the file footer and returns the underlying writer.
+    pub fn finish(mut self) -> Result<(W, parquet::FileMetaData)> {
+        self.assert_previous_writer_closed()?;
+        let meta = self.write_metadata()?;
+        let inner = self.buf.into_inner();
+
+        Ok((inner, meta))
     }
 }
 
@@ -1686,7 +1687,7 @@ mod tests {
         // Splice column data into a row group
         let mut row_group_writer = file_writer.next_row_group().unwrap();
         for (write, close) in column_state {
-            let buf = Bytes::from(write.into_inner().unwrap());
+            let buf = Bytes::from(write.into_inner());
             row_group_writer
                 .append_column(&buf, close.unwrap())
                 .unwrap();

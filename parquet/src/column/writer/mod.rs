@@ -1867,8 +1867,6 @@ mod tests {
         assert_eq!(stats.null_count(), 0);
         assert!(stats.distinct_count().is_none());
 
-        drop(write);
-
         let props = ReaderProperties::builder()
             .set_backward_compatible_lz4(false)
             .build();
@@ -1912,8 +1910,6 @@ mod tests {
 
         let r = writer.close().unwrap();
         assert!(r.metadata.statistics().is_none());
-
-        drop(write);
 
         let props = ReaderProperties::builder()
             .set_backward_compatible_lz4(false)
@@ -2045,8 +2041,6 @@ mod tests {
         let mut writer = get_test_column_writer::<Int32Type>(page_writer, 0, 0, props);
         writer.write_batch(data, None, None).unwrap();
         let r = writer.close().unwrap();
-
-        drop(write);
 
         // Read pages and check the sequence
         let props = ReaderProperties::builder()
@@ -3270,8 +3264,6 @@ mod tests {
         let values_written = writer.write_batch(values, def_levels, rep_levels).unwrap();
         assert_eq!(values_written, values.len());
         let result = writer.close().unwrap();
-
-        drop(write);
 
         let props = ReaderProperties::builder()
             .set_backward_compatible_lz4(false)
