@@ -319,25 +319,23 @@ impl Field {
         let logical_type = self.ty.logical_type();
         let repetition = self.ty.repetition();
         let converted_type = self.ty.converted_type();
+        let length = self.ty.length();
+
+        let mut builder = quote! {
+            ParquetType::primitive_type_builder(#field_name, #physical_type)
+                .with_logical_type(#logical_type)
+                .with_repetition(#repetition)
+        };
 
         if let Some(converted_type) = converted_type {
-            quote! {
-                fields.push(ParquetType::primitive_type_builder(#field_name, #physical_type)
-                    .with_logical_type(#logical_type)
-                    .with_repetition(#repetition)
-                    .with_converted_type(#converted_type)
-                    .build().unwrap().into()
-                )
-            }
-        } else {
-            quote! {
-                fields.push(ParquetType::primitive_type_builder(#field_name, #physical_type)
-                    .with_logical_type(#logical_type)
-                    .with_repetition(#repetition)
-                    .build().unwrap().into()
-                )
-            }
+            builder = quote! { #builder.with_converted_type(#converted_type) };
         }
+
+        if let Some(length) = length {
+            builder = quote! { #builder.with_length(#length) };
+        }
+
+        quote! {  fields.push(#builder.build().unwrap().into()) }
     }
 
     fn option_into_vals(&self) -> proc_macro2::TokenStream {
@@ -397,7 +395,7 @@ impl Field {
                 quote! { rec.#field_name.signed_duration_since(::chrono::NaiveDate::from_ymd(1970, 1, 1)).num_days() as i32 }
             }
             Some(ThirdPartyType::Uuid) => {
-                quote! { (&rec.#field_name.to_string()[..]).into() }
+                quote! { rec.#field_name.as_bytes().to_vec().into() }
             }
             _ => {
                 if self.is_a_byte_buf {
@@ -433,7 +431,7 @@ impl Field {
                 }
             }
             Some(ThirdPartyType::Uuid) => {
-                quote! { ::uuid::Uuid::parse_str(vals[i].data().convert()).unwrap() }
+                quote! { ::uuid::Uuid::from_bytes(vals[i].data().try_into().unwrap()) }
             }
             _ => match &self.ty {
                 Type::TypePath(_) => match self.ty.last_part().as_str() {
@@ -641,8 +639,37 @@ impl Type {
             }
             "f32" => BasicType::FLOAT,
             "f64" => BasicType::DOUBLE,
-            "String" | "str" | "Uuid" => BasicType::BYTE_ARRAY,
+            "String" | "str" => BasicType::BYTE_ARRAY,
+            "Uuid" => BasicType::FIXED_LEN_BYTE_ARRAY,
             f => unimplemented!("{} currently is not supported", f),
+        }
+    }
+
+    fn length(&self) -> Option<i32> {
+        let last_part = self.last_part();
+        let leaf_type = self.leaf_type_recursive();
+
+        match leaf_type {
+            Type::Array(ref first_type) => {
+                if let Type::TypePath(_) = **first_type {
+                    if last_part == "u8" {
+                        return Some(1);
+                    }
+                }
+            }
+            Type::Vec(ref first_type) | Type::Slice(ref first_type) => {
+                if let Type::TypePath(_) = **first_type {
+                    if last_part == "u8" {
+                        return None;
+                    }
+                }
+            }
+            _ => (),
+        }
+
+        match last_part.trim() {
+            "Uuid" => Some(16),
+            _ => None,
         }
     }
 
@@ -1354,8 +1381,8 @@ mod test {
         let when = Field::from(&fields[0]);
         assert_eq!(when.writer_snippet().to_string(),(quote!{
             {
-                let vals : Vec<_> = records.iter().map(|rec| (&rec.unique_id.to_string()[..]).into() ).collect();
-                if let ColumnWriter::ByteArrayColumnWriter(ref mut typed) = column_writer.untyped() {
+                let vals : Vec<_> = records.iter().map(|rec| rec.unique_id.as_bytes().to_vec().into() ).collect();
+                if let ColumnWriter::FixedLenByteArrayColumnWriter(ref mut typed) = column_writer.untyped() {
                     typed.write_batch(&vals[..], None, None) ?;
                 } else {
                     panic!("Schema and struct disagree on type for {}" , stringify!{ unique_id })
@@ -1375,7 +1402,7 @@ mod test {
                     }
                 }).collect();
 
-                if let ColumnWriter::ByteArrayColumnWriter(ref mut typed) = column_writer.untyped() {
+                if let ColumnWriter::FixedLenByteArrayColumnWriter(ref mut typed) = column_writer.untyped() {
                     typed.write_batch(&vals[..], Some(&definition_levels[..]), None) ?;
                 } else {
                     panic!("Schema and struct disagree on type for {}" , stringify!{ maybe_unique_id })
@@ -1398,14 +1425,14 @@ mod test {
             {
                 let mut vals_vec = Vec::new();
                 vals_vec.resize(num_records, Default::default());
-                let mut vals: &mut [::parquet::data_type::ByteArray] = vals_vec.as_mut_slice();
-                if let ColumnReader::ByteArrayColumnReader(mut typed) = column_reader {
+                let mut vals: &mut [::parquet::data_type::FixedLenByteArray] = vals_vec.as_mut_slice();
+                if let ColumnReader::FixedLenByteArrayColumnReader(mut typed) = column_reader {
                     typed.read_records(num_records, None, None, vals)?;
                 } else {
                     panic!("Schema and struct disagree on type for {}", stringify!{ unique_id });
                 }
                 for (i, r) in &mut records[..num_records].iter_mut().enumerate() {
-                    r.unique_id = ::uuid::Uuid::parse_str(vals[i].data().convert()).unwrap();
+                    r.unique_id = ::uuid::Uuid::from_bytes(vals[i].data().try_into().unwrap());
                 }
             }
         }).to_string());
